@@ -1,46 +1,37 @@
-class NonAdBlockEngineV2 {
+class NonAdBlockEngineV3 {
   constructor(config = {}) {
     this.config = Object.assign({
       baitUrls: [
         'https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js',
-        'https://googleads.g.doubleclick.net/pagead/id',
         'https://static.criteo.net/js/ld/ld.js'
       ],
-      baitClasses: [
-        'adsbygoogle', 'ad-banner', 'ad-zone', 'ad-space',
-        'pub_300x250', 'sponsor-ad', 'text-ad-links'
-      ],
+      baitClasses: ['adsbygoogle', 'ad-zone', 'ad-space', 'pub_300x250', 'sponsor-ad'],
+      heuristicKeywords: [/adblock/i, /ublock/i, /adguard/i, /ad-blocker/i, /block-ads/i],
+      minMockSize: 2000,
+      scoreThreshold: 3,
       strictMode: true,
       onDetected: () => this.executeProtection()
     }, config);
 
+    this.blockScore = 0;
     this.isDetected = false;
   }
 
   async run() {
-    // 1. Hızlı Senkron Kontroller
-    if (this.checkInjectedStyles() || this.checkGlobalProxies()) {
-      return this.triggerDetection();
-    }
+    this.scanDOMHeuristics();
+    this.checkGlobalProperties();
 
-    // 2. Derin Asenkron Kontroller (Ağ & DOM)
-    const [networkBlocked, domBlocked, metricBlocked] = await Promise.all([
-      this.checkNetworkPayloads(),
-      this.checkDOMBait(),
-      this.checkReflowMetrics()
+    const [mockDetected, domBlocked] = await Promise.all([
+      this.checkMockPayloads(),
+      this.checkDOMBait()
     ]);
 
-    if (networkBlocked || domBlocked || metricBlocked) {
-      return this.triggerDetection();
-    }
+    if (mockDetected) this.blockScore += 3;
+    if (domBlocked) this.blockScore += 2;
 
-    // 3. Late-Injection Taraması (AdBlock eklentilerinin gecikmeli müdahalesine karşı)
-    setTimeout(async () => {
-      const lateDomCheck = await this.checkDOMBait();
-      if (lateDomCheck && !this.isDetected) {
-        this.triggerDetection();
-      }
-    }, 450);
+    if (this.blockScore >= this.config.scoreThreshold) {
+      this.triggerDetection();
+    }
   }
 
   triggerDetection() {
@@ -49,35 +40,21 @@ class NonAdBlockEngineV2 {
     this.config.onDetected();
   }
 
-  // Modern eklentilerin sayfaya gömdüğü gizli kural stili taraması
-  checkInjectedStyles() {
-    const headStyles = document.querySelectorAll('style, link[rel="stylesheet"]');
-    for (let style of headStyles) {
-      const content = style.innerHTML || '';
-      if (content.includes('adsbygoogle') && (content.includes('display:none') || content.includes('important'))) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  // Eklentilerin iz bıraktığı global objeleri kontrol etme
-  checkGlobalProxies() {
-    return !!(
-      window.__adblocker ||
-      window.uBlockOrigin ||
-      window.canRunAds === false ||
-      (window.google_ad_status && window.google_ad_status === 3)
-    );
-  }
-
-  // Dönen yanıtın boş (0 byte / dummy response) olup olmadığını kontrol eder
-  async checkNetworkPayloads() {
+  // 1. Mock Data / 200 OK Yanıt Analizi
+  async checkMockPayloads() {
     for (let url of this.config.baitUrls) {
       try {
-        const response = await fetch(url, { method: 'GET', mode: 'no-cors', cache: 'no-store' });
-        // no-cors modunda response.type 'opaque' döner. Eğer ablock isteği tamamen yuttuysa throw eder veya status 0 kalır.
-        if (!response) return true;
+        const response = await fetch(url, { method: 'GET', cache: 'no-store' });
+        const text = await response.text();
+
+        // 200 OK dönse bile içerik boşsa, çok küçükse veya no-op yorumu içeriyorsa
+        if (
+          text.length < this.config.minMockSize ||
+          text.includes('noop') ||
+          text.includes('google_ad_status') === false
+        ) {
+          return true;
+        }
       } catch (e) {
         return true;
       }
@@ -85,57 +62,71 @@ class NonAdBlockEngineV2 {
     return false;
   }
 
-  // Reflow zorlaması ile DOM tespiti
+  // 2. Sezgisel (Heuristic) DOM ve Eklenti İzi Taraması
+  scanDOMHeuristics() {
+    const elements = document.querySelectorAll('script, style, link, div, iframe');
+
+    elements.forEach((el) => {
+      const attributes = [el.id, el.className, el.src, el.href].filter(Boolean).join(' ');
+
+      this.config.heuristicKeywords.forEach((regex) => {
+        if (regex.test(attributes)) {
+          this.blockScore += 1;
+        }
+      });
+
+      if (el.tagName === 'STYLE' || el.tagName === 'SCRIPT') {
+        const content = el.innerHTML || '';
+        if (/display\s*:\s*none\s*!important/i.test(content) && /ad/i.test(content)) {
+          this.blockScore += 2;
+        }
+      }
+    });
+  }
+
+  // 3. Global Obje Sabitleme / Tampering Tespiti
+  checkGlobalProperties() {
+    if (window.adsbygoogle && Array.isArray(window.adsbygoogle) && window.adsbygoogle.length === 0) {
+      try {
+        window.adsbygoogle.push({});
+        if (window.adsbygoogle.length === 0) {
+          this.blockScore += 2;
+        }
+      } catch (e) {
+        this.blockScore += 2;
+      }
+    }
+
+    if (window.canRunAds === false || window.isAdBlockActive === true) {
+      this.blockScore += 3;
+    }
+  }
+
+  // 4. Reflow & Layout Bounding Box Testi
   checkDOMBait() {
     return new Promise((resolve) => {
       const bait = document.createElement('div');
       bait.className = this.config.baitClasses.join(' ');
-      bait.id = 'ad-wrapper-v2-test';
-      bait.setAttribute('data-ad-client', 'ca-pub-0000000000000000');
-      bait.style.cssText = 'position:absolute!important;top:-9999px!important;left:-9999px!important;width:300px!important;height:250px!important;display:block!important;visibility:visible!important;';
-
-      const ins = document.createElement('ins');
-      ins.className = 'adsbygoogle';
-      ins.style.cssText = 'display:block!important;width:100%!important;height:100%!important;';
-      bait.appendChild(ins);
+      bait.style.cssText = 'position:absolute!important;top:-9999px!important;left:-9999px!important;width:300px!important;height:250px!important;display:block!important;';
 
       document.body.appendChild(bait);
 
       requestAnimationFrame(() => {
         setTimeout(() => {
           const rect = bait.getBoundingClientRect();
-          const clientRects = bait.getClientRects();
           const styles = window.getComputedStyle(bait);
 
           const isBlocked = (
             rect.width === 0 ||
             rect.height === 0 ||
-            clientRects.length === 0 ||
             styles.getPropertyValue('display') === 'none' ||
-            styles.getPropertyValue('visibility') === 'hidden' ||
-            bait.offsetParent === null
+            styles.getPropertyValue('visibility') === 'hidden'
           );
 
           bait.remove();
           resolve(isBlocked);
-        }, 80);
+        }, 60);
       });
-    });
-  }
-
-  // Reklam alanının zorla boyutlandırılmasını sınama
-  checkReflowMetrics() {
-    return new Promise((resolve) => {
-      const container = document.createElement('div');
-      container.className = 'pub_300x250 text-ad-links';
-      container.style.cssText = 'width:1px;height:1px;position:absolute;left:-999px;';
-      document.body.appendChild(container);
-
-      setTimeout(() => {
-        const blocked = container.offsetHeight === 0 || container.offsetWidth === 0;
-        container.remove();
-        resolve(blocked);
-      }, 50);
     });
   }
 
@@ -164,15 +155,15 @@ class NonAdBlockEngineV2 {
     `;
 
     card.innerHTML = `
-      <h2 style="color: #f85149 !important; margin: 0 0 12px 0 !important; font-size: 20px !important;">Reklam Engelleyici Saptandı</h2>
+      <h2 style="color: #f85149 !important; margin: 0 0 12px 0 !important; font-size: 20px !important;">Sistem Kilitlendi</h2>
       <p style="color: #8b949e !important; font-size: 13px !important; line-height: 1.5 !important; margin: 0 0 20px 0 !important;">
-        Sayfadaki içeriklerin yüklenebilmesi için tarayıcınızdaki AdBlock uzantısını kapatmanız veya bu alan adını istisnalara eklemeniz gerekmektedir.
+        Gelişmiş bir reklam engelleyici veya gizlilik eklentisi tespit edildi. Lütfen bu alan adı için eklentinizi tamamen kapatın.
       </p>
       <button id="nonadblock-reload-btn" style="
         background: #238636 !important; color: #fff !important; border: none !important;
         padding: 10px 20px !important; font-size: 13px !important; font-weight: 600 !important;
         border-radius: 6px !important; cursor: pointer !important; width: 100% !important;
-      ">Engelleyiciyi Kapattım, Yenile</button>
+      ">Yeniden Tara ve Aç</button>
     `;
 
     modal.appendChild(card);
