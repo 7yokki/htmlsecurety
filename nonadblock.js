@@ -1,4 +1,4 @@
-class NonAdBlockEngineV5 {
+class NonAdBlockEngineV6 {
   constructor(options = {}) {
     this.options = Object.assign({
       timeoutLimit: 4000,
