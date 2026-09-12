@@ -11,51 +11,11 @@ class NonAdBlockEngineV6 {
     }, options);
 
     this.targetScripts = [
-      {
-        id: 'googlesyndication',
-        url: 'https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js',
-        check: () => !!window.adsbygoogle
-      },
-      {
-        id: 'doubleclick_gpt',
-        url: 'https://securepubads.g.doubleclick.net/tag/js/gpt.js',
-        check: () => !!window.googletag
-      },
-      {
-        id: 'amazon_ads',
-        url: 'https://c.amazon-adsystem.com/aax2/amzn_ads.js',
-        check: () => !!window.amznads
-      },
-      {
-        id: 'criteo',
-        url: 'https://static.criteo.net/js/ld/ld.js',
-        check: () => !!window.criteo_q
-      },
-      {
-        id: 'taboola',
-        url: 'https://cdn.taboola.com/libtrc/unsupported-browser/tfa.js',
-        check: () => !!window._taboola
-      },
-      {
-        id: 'openx_topics',
-        url: 'https://pa.openx.net/topics_frame.html',
-        check: () => !!window.OX
-      },
-      {
-        id: 'pubmatic_topics',
-        url: 'https://ads.pubmatic.com/AdServer/js/topics/topics_frame.html',
-        check: () => !!window.PWT
-      },
-      {
-        id: 'sharethrough',
-        url: 'https://native.sharethrough.com/assets/sfp.js',
-        check: () => !!window.SFP
-      },
-      {
-        id: 'teads',
-        url: 'https://a.teads.tv/page/media/v3/tag.js',
-        check: () => !!window.teads
-      }
+      { id: 'googlesyndication', url: 'https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js', check: () => !!window.adsbygoogle },
+      { id: 'doubleclick', url: 'https://securepubads.g.doubleclick.net/tag/js/gpt.js', check: () => !!window.googletag },
+      { id: 'amazon_ads', url: 'https://c.amazon-adsystem.com/aax2/amzn_ads.js', check: () => !!window.amznads },
+      { id: 'criteo', url: 'https://static.criteo.net/js/ld/ld.js', check: () => !!window.criteo_q },
+      { id: 'taboola', url: 'https://cdn.taboola.com/libtrc/unsupported-browser/tfa.js', check: () => !!window._taboola }
     ];
 
     this.blockedCount = 0;
