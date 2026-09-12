@@ -3,29 +3,31 @@ class NonAdBlockEngineV6 {
     this.options = Object.assign({
       timeoutLimit: 4000,
       strictMode: true,
-      enableConsoleLog: true, // Konsola renkli log basma aktif/pasif
+      enableConsoleLog: true,
+      thresholdRatio: 0.5,
+      minBlockedThreshold: 2,
       onDetected: null,
-      onLog: null // Özel log dinleyici callback: (logObject) => {}
+      onLog: null
     }, options);
 
     this.targetScripts = [
       { id: 'googlesyndication', url: 'https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js', check: () => !!window.adsbygoogle },
       { id: 'doubleclick', url: 'https://securepubads.g.doubleclick.net/tag/js/gpt.js', check: () => !!window.googletag },
       { id: 'amazon_ads', url: 'https://c.amazon-adsystem.com/aax2/amzn_ads.js', check: () => !!window.amznads },
-      { id: 'criteo', url: 'https://static.criteo.net/js/ld/ld.js', check: () => !!window.criteo_q }
+      { id: 'criteo', url: 'https://static.criteo.net/js/ld/ld.js', check: () => !!window.criteo_q },
+      { id: 'taboola', url: 'https://cdn.taboola.com/libtrc/unsupported-browser/tfa.js', check: () => !!window._taboola }
     ];
 
     this.blockedCount = 0;
     this.completedCount = 0;
     this.isTriggered = false;
-    this.logs = []; // Tüm sistem loglarını tutan bellek
+    this.logs = [];
   }
 
-  // --- LOGGING SİSTEMİ ---
   log(level, event, details = {}) {
     const entry = {
       timestamp: new Date().toISOString(),
-      level: level.toUpperCase(), // DEBUG, INFO, WARN, ERROR
+      level: level.toUpperCase(),
       event: event,
       details: details
     };
@@ -60,7 +62,6 @@ class NonAdBlockEngineV6 {
     return JSON.stringify(this.logs, null, 2);
   }
 
-  // --- CORE ENGINE ---
   startInspectionEngine() {
     this.log('INFO', 'ENGINE_START', { targetCount: this.targetScripts.length, config: this.options });
 
@@ -108,12 +109,10 @@ class NonAdBlockEngineV6 {
       this.checkCompletionStatus();
     };
 
-    // 1. Ağ Engeli (onerror)
     script.onerror = () => {
       finalize(true, 'Network request blocked (onerror triggered)', 'WARN');
     };
 
-    // 2. Yanıt ve Surrogate Kontrolü (onload)
     script.onload = () => {
       setTimeout(() => {
         const isRealScriptWorking = item.check();
@@ -125,7 +124,6 @@ class NonAdBlockEngineV6 {
       }, 150);
     };
 
-    // 3. Timeout Kontrolü
     setTimeout(() => {
       if (!isResolved) {
         finalize(true, `Request timed out after ${this.options.timeoutLimit}ms`, 'WARN');
@@ -145,15 +143,26 @@ class NonAdBlockEngineV6 {
     });
 
     if (this.completedCount >= this.targetScripts.length) {
+      const total = this.targetScripts.length;
+      const blockRatio = this.blockedCount / total;
+      
+      const isAdBlockerConfirmed = this.blockedCount >= this.options.minBlockedThreshold && blockRatio >= this.options.thresholdRatio;
+
       this.log('INFO', 'INSPECTION_COMPLETE', { 
         totalBlocked: this.blockedCount, 
-        isClean: this.blockedCount === 0 
+        totalScripts: total,
+        blockRatio: blockRatio,
+        isAdBlockerConfirmed: isAdBlockerConfirmed
       });
 
-      if (this.blockedCount > 0) {
+      if (isAdBlockerConfirmed) {
         this.triggerProtection();
       } else {
-        this.log('INFO', 'SYSTEM_CLEAN', { message: 'No adblocker detected.' });
+        this.log('INFO', 'SYSTEM_CLEAN', { 
+          message: 'AdBlocker not confirmed. Failures treated as network issues.',
+          blockedCount: this.blockedCount,
+          minRequired: this.options.minBlockedThreshold
+        });
       }
     }
   }
@@ -162,7 +171,10 @@ class NonAdBlockEngineV6 {
     if (this.isTriggered) return;
     this.isTriggered = true;
 
-    this.log('ERROR', 'PROTECTION_TRIGGERED', { blockedCount: this.blockedCount });
+    this.log('ERROR', 'PROTECTION_TRIGGERED', { 
+      blockedCount: this.blockedCount,
+      totalCount: this.targetScripts.length
+    });
 
     if (typeof this.options.onDetected === 'function') {
       this.options.onDetected(this.blockedCount, this.getLogs());
@@ -191,7 +203,7 @@ class NonAdBlockEngineV6 {
       <div style="background: #161b22; border: 1px solid #30363d; padding: 32px; border-radius: 8px; max-width: 400px; text-align: center; box-shadow: 0 10px 30px rgba(0,0,0,0.8);">
         <h2 style="color: #f85149; margin: 0 0 12px 0; font-size: 20px;">Reklam Engelleme Tespit Edildi</h2>
         <p style="color: #8b949e; font-size: 13px; line-height: 1.5; margin: 0 0 20px 0;">
-          Ağ paneli taramasında reklam kodlarının engellendiği saptandı. Lütfen bu site için eklentinizi devre dışı bırakın.
+          Ağ taramasında birden fazla reklam kaynağının engellendiği doğrulandı. Lütfen eklentinizi bu site için devre dışı bırakın.
         </p>
         <button onclick="window.location.reload()" style="background: #238636; color: #fff; border: none; padding: 10px 20px; font-size: 13px; font-weight: 600; border-radius: 6px; cursor: pointer; width: 100%;">Sayfayı Yenile</button>
       </div>
