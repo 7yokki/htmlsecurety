@@ -1,92 +1,140 @@
-class NonAdBlockEngine {
+class NonAdBlockEngineV2 {
   constructor(config = {}) {
     this.config = Object.assign({
-      baitScriptUrl: 'https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js',
-      baitClasses: ['adsbygoogle', 'ad-zone', 'ad-space', 'pub_300x250', 'sponsor-ad'],
-      detectionThreshold: 2,
+      baitUrls: [
+        'https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js',
+        'https://googleads.g.doubleclick.net/pagead/id',
+        'https://static.criteo.net/js/ld/ld.js'
+      ],
+      baitClasses: [
+        'adsbygoogle', 'ad-banner', 'ad-zone', 'ad-space',
+        'pub_300x250', 'sponsor-ad', 'text-ad-links'
+      ],
       strictMode: true,
       onDetected: () => this.executeProtection()
     }, config);
 
-    this.score = 0;
-    this.isLocked = false;
+    this.isDetected = false;
   }
 
   async run() {
-    const tests = [
-      this.testNetworkBait(),
-      this.testDOMInterference(),
-      this.testGlobalVariables(),
-      this.testBaitElementMetrics()
-    ];
-
-    const results = await Promise.all(tests);
-    this.score = results.filter(Boolean).length;
-
-    if (this.score >= this.config.detectionThreshold) {
-      this.isLocked = true;
-      this.config.onDetected();
+    // 1. Hızlı Senkron Kontroller
+    if (this.checkInjectedStyles() || this.checkGlobalProxies()) {
+      return this.triggerDetection();
     }
+
+    // 2. Derin Asenkron Kontroller (Ağ & DOM)
+    const [networkBlocked, domBlocked, metricBlocked] = await Promise.all([
+      this.checkNetworkPayloads(),
+      this.checkDOMBait(),
+      this.checkReflowMetrics()
+    ]);
+
+    if (networkBlocked || domBlocked || metricBlocked) {
+      return this.triggerDetection();
+    }
+
+    // 3. Late-Injection Taraması (AdBlock eklentilerinin gecikmeli müdahalesine karşı)
+    setTimeout(async () => {
+      const lateDomCheck = await this.checkDOMBait();
+      if (lateDomCheck && !this.isDetected) {
+        this.triggerDetection();
+      }
+    }, 450);
   }
 
-  testNetworkBait() {
-    return new Promise((resolve) => {
-      const request = new Request(this.config.baitScriptUrl, { method: 'HEAD', mode: 'no-cors' });
-      fetch(request)
-        .then(() => resolve(false))
-        .catch(() => resolve(true));
-    });
+  triggerDetection() {
+    if (this.isDetected) return;
+    this.isDetected = true;
+    this.config.onDetected();
   }
 
-  testDOMInterference() {
+  // Modern eklentilerin sayfaya gömdüğü gizli kural stili taraması
+  checkInjectedStyles() {
+    const headStyles = document.querySelectorAll('style, link[rel="stylesheet"]');
+    for (let style of headStyles) {
+      const content = style.innerHTML || '';
+      if (content.includes('adsbygoogle') && (content.includes('display:none') || content.includes('important'))) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // Eklentilerin iz bıraktığı global objeleri kontrol etme
+  checkGlobalProxies() {
+    return !!(
+      window.__adblocker ||
+      window.uBlockOrigin ||
+      window.canRunAds === false ||
+      (window.google_ad_status && window.google_ad_status === 3)
+    );
+  }
+
+  // Dönen yanıtın boş (0 byte / dummy response) olup olmadığını kontrol eder
+  async checkNetworkPayloads() {
+    for (let url of this.config.baitUrls) {
+      try {
+        const response = await fetch(url, { method: 'GET', mode: 'no-cors', cache: 'no-store' });
+        // no-cors modunda response.type 'opaque' döner. Eğer ablock isteği tamamen yuttuysa throw eder veya status 0 kalır.
+        if (!response) return true;
+      } catch (e) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // Reflow zorlaması ile DOM tespiti
+  checkDOMBait() {
     return new Promise((resolve) => {
       const bait = document.createElement('div');
       bait.className = this.config.baitClasses.join(' ');
-      bait.id = 'ad-wrapper-test';
-      bait.style.cssText = 'position:absolute!important;top:-9999px!important;left:-9999px!important;width:300px!important;height:250px!important;';
+      bait.id = 'ad-wrapper-v2-test';
+      bait.setAttribute('data-ad-client', 'ca-pub-0000000000000000');
+      bait.style.cssText = 'position:absolute!important;top:-9999px!important;left:-9999px!important;width:300px!important;height:250px!important;display:block!important;visibility:visible!important;';
+
+      const ins = document.createElement('ins');
+      ins.className = 'adsbygoogle';
+      ins.style.cssText = 'display:block!important;width:100%!important;height:100%!important;';
+      bait.appendChild(ins);
 
       document.body.appendChild(bait);
 
       requestAnimationFrame(() => {
         setTimeout(() => {
+          const rect = bait.getBoundingClientRect();
+          const clientRects = bait.getClientRects();
           const styles = window.getComputedStyle(bait);
-          const isBlocked = bait.offsetParent === null ||
-                            bait.offsetHeight === 0 ||
-                            bait.offsetWidth === 0 ||
-                            styles.getPropertyValue('display') === 'none' ||
-                            styles.getPropertyValue('visibility') === 'hidden';
+
+          const isBlocked = (
+            rect.width === 0 ||
+            rect.height === 0 ||
+            clientRects.length === 0 ||
+            styles.getPropertyValue('display') === 'none' ||
+            styles.getPropertyValue('visibility') === 'hidden' ||
+            bait.offsetParent === null
+          );
 
           bait.remove();
           resolve(isBlocked);
-        }, 50);
+        }, 80);
       });
     });
   }
 
-  testGlobalVariables() {
+  // Reklam alanının zorla boyutlandırılmasını sınama
+  checkReflowMetrics() {
     return new Promise((resolve) => {
-      const hasAdBlockGlobal = !!(
-        window.google_ad_status ||
-        window.__adblocker ||
-        window.canRunAds === false ||
-        window.uBlockOrigin
-      );
-      resolve(hasAdBlockGlobal);
-    });
-  }
-
-  testBaitElementMetrics() {
-    return new Promise((resolve) => {
-      const ins = document.createElement('ins');
-      ins.className = 'adsbygoogle';
-      ins.style.cssText = 'display:block!important;width:100px!important;height:100px!important;';
-      document.body.appendChild(ins);
+      const container = document.createElement('div');
+      container.className = 'pub_300x250 text-ad-links';
+      container.style.cssText = 'width:1px;height:1px;position:absolute;left:-999px;';
+      document.body.appendChild(container);
 
       setTimeout(() => {
-        const rect = ins.getBoundingClientRect();
-        const isCollapsed = rect.width === 0 || rect.height === 0;
-        ins.remove();
-        resolve(isCollapsed);
+        const blocked = container.offsetHeight === 0 || container.offsetWidth === 0;
+        container.remove();
+        resolve(blocked);
       }, 50);
     });
   }
@@ -94,7 +142,6 @@ class NonAdBlockEngine {
   executeProtection() {
     if (this.config.strictMode) {
       document.body.innerHTML = '';
-      document.head.innerHTML = '';
     }
 
     document.body.style.setProperty('overflow', 'hidden', 'important');
@@ -102,65 +149,41 @@ class NonAdBlockEngine {
 
     const modal = document.createElement('div');
     modal.style.cssText = `
-      position: fixed !important;
-      top: 0 !important;
-      left: 0 !important;
-      width: 100vw !important;
-      height: 100vh !important;
-      background: #0d0f12 !important;
-      z-index: 2147483647 !important;
-      display: flex !important;
-      align-items: center !important;
-      justify-content: center !important;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
+      position: fixed !important; top: 0 !important; left: 0 !important;
+      width: 100vw !important; height: 100vh !important; background: #0b0e14 !important;
+      z-index: 2147483647 !important; display: flex !important; align-items: center !important;
+      justify-content: center !important; font-family: system-ui, sans-serif !important;
       pointer-events: auto !important;
     `;
 
     const card = document.createElement('div');
     card.style.cssText = `
-      background: #161b22 !important;
-      border: 1px solid #30363d !important;
-      padding: 40px !important;
-      border-radius: 12px !important;
-      max-width: 440px !important;
-      text-align: center !important;
-      box-shadow: 0 20px 40px rgba(0,0,0,0.6) !important;
+      background: #161b22 !important; border: 1px solid #30363d !important;
+      padding: 32px !important; border-radius: 8px !important; max-width: 400px !important;
+      text-align: center !important; box-shadow: 0 10px 30px rgba(0,0,0,0.8) !important;
     `;
 
-    const title = document.createElement('h2');
-    title.innerText = 'Erişim Engellendi';
-    title.style.cssText = 'color: #f85149 !important; margin: 0 0 16px 0 !important; font-size: 22px !important;';
-
-    const text = document.createElement('p');
-    text.innerText = 'Sistemimiz aktif bir reklam engelleyici (AdBlock) tespit etti. Devam etmek için tarayıcı eklentinizi bu alan adı için devre dışı bırakmalısınız.';
-    text.style.cssText = 'color: #8b949e !important; font-size: 14px !important; line-height: 1.6 !important; margin: 0 0 24px 0 !important;';
-
-    const btn = document.createElement('button');
-    btn.innerText = 'Sistemi Yeniden Taramaya Çalış';
-    btn.style.cssText = `
-      background: #238636 !important;
-      color: #ffffff !important;
-      border: none !important;
-      padding: 12px 24px !important;
-      font-size: 14px !important;
-      font-weight: 600 !important;
-      border-radius: 6px !important;
-      cursor: pointer !important;
-      width: 100% !important;
+    card.innerHTML = `
+      <h2 style="color: #f85149 !important; margin: 0 0 12px 0 !important; font-size: 20px !important;">Reklam Engelleyici Saptandı</h2>
+      <p style="color: #8b949e !important; font-size: 13px !important; line-height: 1.5 !important; margin: 0 0 20px 0 !important;">
+        Sayfadaki içeriklerin yüklenebilmesi için tarayıcınızdaki AdBlock uzantısını kapatmanız veya bu alan adını istisnalara eklemeniz gerekmektedir.
+      </p>
+      <button id="nonadblock-reload-btn" style="
+        background: #238636 !important; color: #fff !important; border: none !important;
+        padding: 10px 20px !important; font-size: 13px !important; font-weight: 600 !important;
+        border-radius: 6px !important; cursor: pointer !important; width: 100% !important;
+      ">Engelleyiciyi Kapattım, Yenile</button>
     `;
-    btn.onclick = () => window.location.reload();
 
-    card.appendChild(title);
-    card.appendChild(text);
-    card.appendChild(btn);
     modal.appendChild(card);
-
     document.documentElement.appendChild(modal);
+
+    document.getElementById('nonadblock-reload-btn').onclick = () => window.location.reload();
 
     setInterval(() => {
       if (!document.documentElement.contains(modal)) {
         document.documentElement.appendChild(modal);
       }
-    }, 250);
+    }, 200);
   }
 }
