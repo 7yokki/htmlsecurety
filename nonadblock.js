@@ -1,112 +1,145 @@
-class NonAdBlockEngineV5 {
+class NonAdBlockEngineV6 {
   constructor(options = {}) {
     this.options = Object.assign({
-      timeoutLimit: 3000,
+      timeoutLimit: 4000,
       strictMode: true,
       onDetected: null
     }, options);
 
-    // Ağ panelinde (Network) GERÇEK ISTEK atacak script listesi
-    // Not: Bu URL'ler popüler reklam ağlarının doğrudan script adresleridir.
+    // Network panelinde bizzat görünecek test script'leri
     this.targetScripts = [
-      { id: 'google_ads', url: 'https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js', check: () => window.adsbygoogle },
-      { id: 'adroll', url: 'https://s.adroll.com/j/roundtrip.js', check: () => window.__adroll_loaded },
-      { id: 'taboola', url: 'https://cdn.taboola.com/libtrc/unsupported-browser/tfa.js', check: () => window._taboola },
-      { id: 'outbrain', url: 'https://widgets.outbrain.com/outbrain.js', check: () => window.OBR }
+      { id: 'googlesyndication', url: 'https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js', check: () => !!window.adsbygoogle },
+      { id: 'doubleclick', url: 'https://securepubads.g.doubleclick.net/tag/js/gpt.js', check: () => !!window.googletag },
+      { id: 'amazon_ads', url: 'https://c.amazon-adsystem.com/aax2/amzn_ads.js', check: () => !!window.amznads },
+      { id: 'criteo', url: 'https://static.criteo.net/js/ld/ld.js', check: () => !!window.criteo_q }
     ];
 
     this.blockedCount = 0;
     this.completedCount = 0;
+    this.isTriggered = false;
   }
 
   startInspectionEngine() {
-    console.log('[NonAdBlockEngine] Gerçek DOM script istekleri başlatılıyor...');
+    // DOM'un hazır olmasını bekle ve script'leri enjekte et
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', () => this.injectAllTargets());
+    } else {
+      this.injectAllTargets();
+    }
+  }
 
+  injectAllTargets() {
     this.targetScripts.forEach(item => {
-      this.injectScriptAndVerify(item);
+      this.injectSingleScript(item);
     });
   }
 
-  injectScriptAndVerify(item) {
-    // Network panelinde çıkması için gerçek <script> elementi oluşturuyoruz
+  injectSingleScript(item) {
     const script = document.createElement('script');
-    script.src = item.url + '?_nc=' + Date.now(); // Cache önlemek için timestamp
+    // Cache'i kırıp Network sekmesine zorla düşürmek için timestamp ekliyoruz
+    script.src = item.url + '?_adtest=' + Date.now() + '_' + Math.floor(Math.random() * 1000);
     script.async = true;
-    script.id = 'chk-' + item.id;
+    script.id = 'ad-check-' + item.id;
 
-    let resolved = false;
+    let isResolved = false;
 
-    const cleanup = () => {
+    const finalize = (isBlocked, reason) => {
+      if (isResolved) return;
+      isResolved = true;
+
       if (script.parentNode) {
         script.parentNode.removeChild(script);
       }
+
+      if (isBlocked) {
+        this.blockedCount++;
+        console.warn(`[NonAdBlockEngine] ENGEL TESPİT EDİLDİ: ${item.id} (${reason})`);
+      } else {
+        console.log(`[NonAdBlockEngine] İSTEK BAŞARILI: ${item.id}`);
+      }
+
+      this.checkCompletionStatus();
     };
 
-    // 1. Durum: Ağ seviyesinde tamamen engellendi (uBlock/AdGuard URL'i kesti)
+    // 1. Ağ Düzeyinde Engelleme (uBlock/AdGuard isteği tamamen yuttuysa)
     script.onerror = () => {
-      if (resolved) return;
-      resolved = true;
-      console.warn(`[NonAdBlockEngine] AĞ ENGELİ: ${item.id} (onerror tetiklendi)`);
-      this.blockedCount++;
-      this.checkCompletion();
-      cleanup();
+      finalize(true, 'Ağ İsteği Engellendi / onerror');
     };
 
-    // 2. Durum: Script yüklendi (Ama surrogate/fake mi yoksa gerçek mi?)
+    // 2. Yanıt Geldi Ama Surrogate / Fake mi Kontrolü
     script.onload = () => {
-      if (resolved) return;
-      resolved = true;
-
-      // AdBlocker'lar bazen 200 OK verip içi boş (surrogate) script döndürür.
-      // Bu yüzden script yüklenmiş olsa bile global nesneyi/fonksiyonu kontrol ediyoruz:
+      // AdBlocker'lar 200 OK verip boş script basabileceği için 150ms bekle ve objeyi tara
       setTimeout(() => {
         const isRealScriptWorking = item.check();
-
-        if (!isRealScriptWorking && this.options.strictMode) {
-          console.warn(`[NonAdBlockEngine] FAKE/SURROGATE YANIT: ${item.id} 200 OK döndü ancak nesne tanımlanmadı!`);
-          this.blockedCount++;
+        if (!isRealScriptWorking) {
+          finalize(true, '200 OK Dündü Ancak Obje Manipüle Edildi (Mock Script)');
         } else {
-          console.log(`[NonAdBlockEngine] BAŞARILI: ${item.id} yüklendi ve doğrulandı.`);
+          finalize(false, 'Script Orijinal');
         }
-
-        this.checkCompletion();
-        cleanup();
-      }, 200);
+      }, 150);
     };
 
-    // 3. Durum: Zaman aşımı (Yanıt vermeyen veya sessizce yutulan istekler)
+    // 3. Zaman Aşımı Kontrolü
     setTimeout(() => {
-      if (!resolved) {
-        resolved = true;
-        console.warn(`[NonAdBlockEngine] ZAMAN AŞIMI: ${item.id} isteğine yanıt alınamadı.`);
-        this.blockedCount++;
-        this.checkCompletion();
-        cleanup();
+      if (!isResolved) {
+        finalize(true, 'Zaman Aşımı (Timeout)');
       }
     }, this.options.timeoutLimit);
 
-    // Elementi HEAD içine ekleyerek indirmeyi başlatıyoruz (Network panelinde görünür)
+    // Doğrudan document.head içine basarak Network panelinde görünmesini garantiliyoruz
     (document.head || document.documentElement).appendChild(script);
   }
 
-  checkCompletion() {
+  checkCompletionStatus() {
     this.completedCount++;
+    
+    // Tüm script'ler tarandığında karara var
     if (this.completedCount >= this.targetScripts.length) {
       if (this.blockedCount > 0) {
-        if (typeof this.options.onDetected === 'function') {
-          this.options.onDetected(`Toplam ${this.blockedCount} reklam kaynağı engellendi veya manipüle edildi.`);
-        } else {
-          this.executeProtection();
-        }
+        this.triggerProtection();
       } else {
-        console.log('[NonAdBlockEngine] Temiz. Reklam engelleyici tespit edilmedi.');
+        console.log('[NonAdBlockEngine] Tüm testler temiz. Reklam engelleyici aktif değil.');
       }
     }
   }
 
-  executeProtection() {
-    document.body.innerHTML = '';
-    alert('Reklam engelleyici tespit edildi. Lütfen eklentinizi kapatıp sayfayı yenileyin.');
-    window.location.reload();
+  triggerProtection() {
+    if (this.isTriggered) return;
+    this.isTriggered = true;
+
+    if (typeof this.options.onDetected === 'function') {
+      this.options.onDetected(this.blockedCount);
+    } else {
+      this.executeProtectionUI();
+    }
+  }
+
+  executeProtectionUI() {
+    if (this.options.strictMode) {
+      document.body.innerHTML = '';
+    }
+
+    document.documentElement.style.setProperty('overflow', 'hidden', 'important');
+    document.body.style.setProperty('overflow', 'hidden', 'important');
+
+    const overlay = document.createElement('div');
+    overlay.style.cssText = `
+      position: fixed !important; top: 0 !important; left: 0 !important;
+      width: 100vw !important; height: 100vh !important; background: #0b0e14 !important;
+      z-index: 2147483647 !important; display: flex !important; align-items: center !important;
+      justify-content: center !important; font-family: system-ui, sans-serif !important;
+    `;
+
+    overlay.innerHTML = `
+      <div style="background: #161b22; border: 1px solid #30363d; padding: 32px; border-radius: 8px; max-width: 400px; text-align: center; box-shadow: 0 10px 30px rgba(0,0,0,0.8);">
+        <h2 style="color: #f85149; margin: 0 0 12px 0; font-size: 20px;">Reklam Engelleme Tespit Edildi</h2>
+        <p style="color: #8b949e; font-size: 13px; line-height: 1.5; margin: 0 0 20px 0;">
+          Ağ paneli taramasında reklam kodlarının engellendiği saptandı. Lütfen bu site için eklentinizi devre dışı bırakın.
+        </p>
+        <button onclick="window.location.reload()" style="background: #238636; color: #fff; border: none; padding: 10px 20px; font-size: 13px; font-weight: 600; border-radius: 6px; cursor: pointer; width: 100%;">Sayfayı Yenile</button>
+      </div>
+    `;
+
+    document.documentElement.appendChild(overlay);
   }
 }
