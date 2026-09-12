@@ -1,0 +1,145 @@
+```html
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dosyalar</title>
+
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 900px;
+            margin: 40px auto;
+            padding: 20px;
+            background: #f5f5f5;
+            color: #222;
+        }
+
+        h1 {
+            margin-bottom: 20px;
+        }
+
+        .file-list {
+            background: white;
+            border-radius: 10px;
+            overflow: hidden;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, .08);
+        }
+
+        .item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 14px 18px;
+            border-bottom: 1px solid #eee;
+            text-decoration: none;
+            color: #1769aa;
+        }
+
+        .item:last-child {
+            border-bottom: none;
+        }
+
+        .item:hover {
+            background: #f0f6ff;
+        }
+
+        .folder {
+            color: #b06a00;
+            font-weight: bold;
+        }
+
+        .error {
+            color: #c00;
+            background: #fff0f0;
+            padding: 15px;
+            border-radius: 8px;
+        }
+    </style>
+</head>
+
+<body>
+
+<h1>Dosyalar</h1>
+
+<div id="files">Yükleniyor...</div>
+
+<script>
+    const OWNER = "7yokki";
+    const REPO = "htmlsecurety";
+
+    const PATH = "docs";
+
+    const container = document.getElementById("files");
+
+    async function loadFiles() {
+        try {
+            const url =
+                `https://api.github.com/repos/${OWNER}/${REPO}/contents/${PATH}`;
+
+            const response = await fetch(url);
+
+            if (!response.ok) {
+                throw new Error(
+                    `GitHub API HTTP ${response.status}`
+                );
+            }
+
+            const items = await response.json();
+
+            if (!Array.isArray(items)) {
+                throw new Error("GitHub API beklenmeyen bir cevap döndürdü.");
+            }
+
+            items.sort((a, b) => {
+                if (a.type !== b.type) {
+                    return a.type === "dir" ? -1 : 1;
+                }
+
+                return a.name.localeCompare(b.name);
+            });
+
+            container.innerHTML = "";
+
+            const list = document.createElement("div");
+            list.className = "file-list";
+
+            for (const item of items) {
+                const link = document.createElement("a");
+
+                link.className =
+                    "item " + (item.type === "dir" ? "folder" : "");
+
+                link.textContent =
+                    (item.type === "dir" ? "📁 " : "📄 ") + item.name;
+
+                if (item.type === "dir") {
+                    link.href = "?path=" + encodeURIComponent(item.path);
+                } else {
+                    link.href =
+                        "https://7yokki.github.io/htmlsecurety/" +
+                        item.path;
+
+                    link.target = "_blank";
+                }
+
+                list.appendChild(link);
+            }
+
+            container.appendChild(list);
+
+        } catch (error) {
+            container.innerHTML =
+                `<div class="error">Hata: ${error.message}</div>`;
+
+            console.error(error);
+        }
+    }
+
+    loadFiles();
+</script>
+
+</body>
+</html>
+```
