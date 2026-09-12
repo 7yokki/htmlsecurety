@@ -3,10 +3,11 @@ class NonAdBlockEngineV6 {
     this.options = Object.assign({
       timeoutLimit: 4000,
       strictMode: true,
-      onDetected: null
+      enableConsoleLog: true, // Konsola renkli log basma aktif/pasif
+      onDetected: null,
+      onLog: null // Özel log dinleyici callback: (logObject) => {}
     }, options);
 
-    // Network panelinde bizzat görünecek test script'leri
     this.targetScripts = [
       { id: 'googlesyndication', url: 'https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js', check: () => !!window.adsbygoogle },
       { id: 'doubleclick', url: 'https://securepubads.g.doubleclick.net/tag/js/gpt.js', check: () => !!window.googletag },
@@ -17,10 +18,52 @@ class NonAdBlockEngineV6 {
     this.blockedCount = 0;
     this.completedCount = 0;
     this.isTriggered = false;
+    this.logs = []; // Tüm sistem loglarını tutan bellek
   }
 
+  // --- LOGGING SİSTEMİ ---
+  log(level, event, details = {}) {
+    const entry = {
+      timestamp: new Date().toISOString(),
+      level: level.toUpperCase(), // DEBUG, INFO, WARN, ERROR
+      event: event,
+      details: details
+    };
+
+    this.logs.push(entry);
+
+    if (this.options.enableConsoleLog) {
+      const styles = {
+        DEBUG: 'color: #8b949e; font-weight: bold;',
+        INFO: 'color: #58a6ff; font-weight: bold;',
+        WARN: 'color: #d29922; font-weight: bold;',
+        ERROR: 'color: #f85149; font-weight: bold;'
+      };
+      console.log(
+        `%c[NonAdBlockEngine][${entry.level}] %c${entry.event}`,
+        styles[entry.level] || '',
+        'color: inherit;',
+        Object.keys(details).length ? details : ''
+      );
+    }
+
+    if (typeof this.options.onLog === 'function') {
+      this.options.onLog(entry);
+    }
+  }
+
+  getLogs() {
+    return this.logs;
+  }
+
+  exportLogsAsJSON() {
+    return JSON.stringify(this.logs, null, 2);
+  }
+
+  // --- CORE ENGINE ---
   startInspectionEngine() {
-    // DOM'un hazır olmasını bekle ve script'leri enjekte et
+    this.log('INFO', 'ENGINE_START', { targetCount: this.targetScripts.length, config: this.options });
+
     if (document.readyState === 'loading') {
       document.addEventListener('DOMContentLoaded', () => this.injectAllTargets());
     } else {
@@ -35,15 +78,19 @@ class NonAdBlockEngineV6 {
   }
 
   injectSingleScript(item) {
+    const cacheBuster = Date.now() + '_' + Math.floor(Math.random() * 1000);
+    const targetUrl = item.url + '?_adtest=' + cacheBuster;
+
     const script = document.createElement('script');
-    // Cache'i kırıp Network sekmesine zorla düşürmek için timestamp ekliyoruz
-    script.src = item.url + '?_adtest=' + Date.now() + '_' + Math.floor(Math.random() * 1000);
+    script.src = targetUrl;
     script.async = true;
     script.id = 'ad-check-' + item.id;
 
     let isResolved = false;
 
-    const finalize = (isBlocked, reason) => {
+    this.log('DEBUG', 'SCRIPT_INJECTED', { id: item.id, url: targetUrl });
+
+    const finalize = (isBlocked, reason, level = 'WARN') => {
       if (isResolved) return;
       isResolved = true;
 
@@ -53,52 +100,60 @@ class NonAdBlockEngineV6 {
 
       if (isBlocked) {
         this.blockedCount++;
-        console.warn(`[NonAdBlockEngine] ENGEL TESPİT EDİLDİ: ${item.id} (${reason})`);
+        this.log(level, 'SCRIPT_BLOCKED', { id: item.id, reason: reason });
       } else {
-        console.log(`[NonAdBlockEngine] İSTEK BAŞARILI: ${item.id}`);
+        this.log('INFO', 'SCRIPT_PASSED', { id: item.id, reason: reason });
       }
 
       this.checkCompletionStatus();
     };
 
-    // 1. Ağ Düzeyinde Engelleme (uBlock/AdGuard isteği tamamen yuttuysa)
+    // 1. Ağ Engeli (onerror)
     script.onerror = () => {
-      finalize(true, 'Ağ İsteği Engellendi / onerror');
+      finalize(true, 'Network request blocked (onerror triggered)', 'WARN');
     };
 
-    // 2. Yanıt Geldi Ama Surrogate / Fake mi Kontrolü
+    // 2. Yanıt ve Surrogate Kontrolü (onload)
     script.onload = () => {
-      // AdBlocker'lar 200 OK verip boş script basabileceği için 150ms bekle ve objeyi tara
       setTimeout(() => {
         const isRealScriptWorking = item.check();
         if (!isRealScriptWorking) {
-          finalize(true, '200 OK Dündü Ancak Obje Manipüle Edildi (Mock Script)');
+          finalize(true, '200 OK returned but global object is missing/manipulated (Surrogate response)', 'ERROR');
         } else {
-          finalize(false, 'Script Orijinal');
+          finalize(false, 'Script loaded and verified successfully', 'INFO');
         }
       }, 150);
     };
 
-    // 3. Zaman Aşımı Kontrolü
+    // 3. Timeout Kontrolü
     setTimeout(() => {
       if (!isResolved) {
-        finalize(true, 'Zaman Aşımı (Timeout)');
+        finalize(true, `Request timed out after ${this.options.timeoutLimit}ms`, 'WARN');
       }
     }, this.options.timeoutLimit);
 
-    // Doğrudan document.head içine basarak Network panelinde görünmesini garantiliyoruz
     (document.head || document.documentElement).appendChild(script);
   }
 
   checkCompletionStatus() {
     this.completedCount++;
     
-    // Tüm script'ler tarandığında karara var
+    this.log('DEBUG', 'PROGRESS_UPDATE', { 
+      completed: this.completedCount, 
+      total: this.targetScripts.length, 
+      blockedSoFar: this.blockedCount 
+    });
+
     if (this.completedCount >= this.targetScripts.length) {
+      this.log('INFO', 'INSPECTION_COMPLETE', { 
+        totalBlocked: this.blockedCount, 
+        isClean: this.blockedCount === 0 
+      });
+
       if (this.blockedCount > 0) {
         this.triggerProtection();
       } else {
-        console.log('[NonAdBlockEngine] Tüm testler temiz. Reklam engelleyici aktif değil.');
+        this.log('INFO', 'SYSTEM_CLEAN', { message: 'No adblocker detected.' });
       }
     }
   }
@@ -107,8 +162,10 @@ class NonAdBlockEngineV6 {
     if (this.isTriggered) return;
     this.isTriggered = true;
 
+    this.log('ERROR', 'PROTECTION_TRIGGERED', { blockedCount: this.blockedCount });
+
     if (typeof this.options.onDetected === 'function') {
-      this.options.onDetected(this.blockedCount);
+      this.options.onDetected(this.blockedCount, this.getLogs());
     } else {
       this.executeProtectionUI();
     }
